@@ -1,6 +1,9 @@
 const express = require("express");
 const app = express();
 
+// FIX 1: Add this middleware so Express can read incoming JSON request bodies
+app.use(express.json());
+
 // In-memory array pre-filled with 3 example tasks
 const tasks = [
     { id: 1, title: "Learn Node.js", done: true },
@@ -24,8 +27,8 @@ app.get("/health", (req, res) => {
     });
 });
 
-// Stage 1: returns whole list
-app.get("/tasks", (req,res) => {
+// Stage 2: returns whole list
+app.get("/tasks", (req, res) => {
     res.json(tasks);
 });
 
@@ -41,4 +44,31 @@ app.get("/tasks/:id", (req, res) => {
     res.json(task);
 });
 
-app.listen(3000);
+// Stage 3: POST /tasks - Create a new task
+app.post("/tasks", (req, res) => {
+    // FIX 2: Extract 'title' from the req.body object
+    const { title } = req.body;
+
+    // Input Validation
+    if (!title || typeof title !== "string" || title.trim() === "") {
+        return res.status(400).json({ error: "Title is required and mustn't be empty" });
+    }
+
+    // Auto-generate the next free ID
+    const newId = tasks.length > 0 ? Math.max(...tasks.map(t => t.id)) + 1 : 1;
+
+    const newTask = {
+        id: newId,
+        title: title.trim(),
+        done: false
+    };
+
+    tasks.push(newTask);
+
+    // Return status 201 Created with the new task object
+    res.status(201).json(newTask);
+});
+
+app.listen(3000, () => {
+    console.log("Server running on port 3000");
+});
