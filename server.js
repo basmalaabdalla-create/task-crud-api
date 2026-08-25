@@ -86,42 +86,47 @@ app.post('/tasks', (req, res) => {
   res.status(201).json(newTask);
 });
 
-// Stage 4: PUT /tasks/:id
-app.put("/tasks/:id", (req, res) => {
-    const taskId = parseInt(req.params.id);
-    const taskIndex = tasks.findIndex(t => t.id === taskId);
+// PUT /tasks/:id - Update a task in SQLite
+app.put('/tasks/:id', (req, res) => {
+  const { id } = req.params;
+  const { title, done } = req.body;
 
-    if (taskIndex === -1) {
-        return res.status(404).json({ error: `Task ${taskId} not found` });
-    }
+  // Validate request body
+  if (!title || typeof title !== 'string' || title.trim() === '' || typeof done !== 'boolean') {
+    return res.status(400).json({ error: "Invalid title or done status" });
+  }
 
-    const { title, done } = req.body;
+  // Convert boolean to 0 or 1 for SQLite
+  const doneValue = done ? 1 : 0;
 
-    if (title === undefined && done === undefined) {
-        return res.status(400).json({ error: "Request body must contain title or done status" });
-    }
+  // Execute update query
+  const update = db.prepare('UPDATE tasks SET title = ?, done = ? WHERE id = ?');
+  const info = update.run(title.trim(), doneValue, id);
 
-    if (title !== undefined && (typeof title !== "string" || title.trim() === "")) {
-        return res.status(400).json({ error: "Title must be a non-empty string" });
-    }
+  // If no rows were updated, task doesn't exist
+  if (info.changes === 0) {
+    return res.status(404).json({ error: "Task not found" });
+  }
 
-    if (title !== undefined) tasks[taskIndex].title = title.trim();
-    if (done !== undefined) tasks[taskIndex].done = Boolean(done);
-
-    res.json(tasks[taskIndex]);
+  // Fetch and return the updated task
+  const updatedTask = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id);
+  res.json(updatedTask);
 });
 
-// Stage 4: DELETE /tasks/:id
-app.delete("/tasks/:id", (req, res) => {
-    const taskId = parseInt(req.params.id);
-    const taskIndex = tasks.findIndex(t => t.id === taskId);
+// DELETE /tasks/:id - Delete a task from SQLite
+app.delete('/tasks/:id', (req, res) => {
+  const { id } = req.params;
 
-    if (taskIndex === -1) {
-        return res.status(404).json({ error: `Task ${taskId} not found` });
-    }
+  const del = db.prepare('DELETE FROM tasks WHERE id = ?');
+  const info = del.run(id);
 
-    tasks.splice(taskIndex, 1);
-    res.status(204).send();
+  // If no rows were deleted, task doesn't exist
+  if (info.changes === 0) {
+    return res.status(404).json({ error: "Task not found" });
+  }
+
+  // Success: 204 No Content
+  res.status(204).send();
 });
 
 app.listen(3000, () => {
