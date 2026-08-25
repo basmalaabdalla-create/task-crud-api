@@ -5,6 +5,26 @@ const swaggerDocument = require("./openapi.json");
 const app = express();
 app.use(express.json());
 
+const Database = require('better-sqlite3');
+const db = new Database('tasks.db');
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    done INTEGER DEFAULT 0
+  )
+`);
+
+const count = db.prepare('SELECT COUNT(*) AS count FROM tasks').get().count;
+
+if (count === 0) {
+  const insert = db.prepare('INSERT INTO tasks (title, done) VALUES (?, ?)');
+  insert.run('Learn Node.js', 1);
+  insert.run('Build a CRUD API', 1);
+  insert.run('Connect to SQLite', 0);
+}
+
 // Serve Swagger UI at /docs
 app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
@@ -29,21 +49,22 @@ app.get("/health", (req, res) => {
     res.json({ status: "ok" });
 });
 
-// Stage 2: GET /tasks
-app.get("/tasks", (req, res) => {
-    res.json(tasks);
+// GET /tasks - Read all tasks from SQLite
+app.get('/tasks', (req, res) => {
+  const tasks = db.prepare('SELECT * FROM tasks').all();
+  res.json(tasks);
 });
 
-// Stage 2: GET /tasks/:id
-app.get("/tasks/:id", (req, res) => {
-    const taskId = parseInt(req.params.id);
-    const task = tasks.find(t => t.id === taskId);
+// GET /tasks/:id - Read a single task by ID from SQLite
+app.get('/tasks/:id', (req, res) => {
+  const { id } = req.params;
+  const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id);
 
-    if (!task) {
-        return res.status(404).json({ error: `Task ${taskId} not found` });
-    }
+  if (!task) {
+    return res.status(404).json({ error: "Task not found" });
+  }
 
-    res.json(task);
+  res.json(task);
 });
 
 // Stage 3: POST /tasks
