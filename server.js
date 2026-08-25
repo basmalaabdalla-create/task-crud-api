@@ -67,19 +67,23 @@ app.get('/tasks/:id', (req, res) => {
   res.json(task);
 });
 
-// Stage 3: POST /tasks
-app.post("/tasks", (req, res) => {
-    const { title } = req.body;
+// POST /tasks - Create a new task in SQLite
+app.post('/tasks', (req, res) => {
+  const { title } = req.body;
 
-    if (!title || typeof title !== "string" || title.trim() === "") {
-        return res.status(400).json({ error: "Title is required and mustn't be empty" });
-    }
+  // Validate title: missing or empty string returns 400
+  if (!title || typeof title !== 'string' || title.trim() === '') {
+    return res.status(400).json({ error: "Title is required" });
+  }
 
-    const newId = tasks.length > 0 ? Math.max(...tasks.map(t => t.id)) + 1 : 1;
-    const newTask = { id: newId, title: title.trim(), done: false };
+  // Insert the task into the database (done defaults to 0/false)
+  const insert = db.prepare('INSERT INTO tasks (title, done) VALUES (?, ?)');
+  const result = insert.run(title.trim(), 0);
 
-    tasks.push(newTask);
-    res.status(201).json(newTask);
+  // Retrieve the newly created task using its auto-generated ID
+  const newTask = db.prepare('SELECT * FROM tasks WHERE id = ?').get(result.lastInsertRowid);
+
+  res.status(201).json(newTask);
 });
 
 // Stage 4: PUT /tasks/:id
