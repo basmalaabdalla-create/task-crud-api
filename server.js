@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require("express");
 const swaggerUi = require("swagger-ui-express");
 const swaggerDocument = require("./openapi.json");
@@ -5,25 +6,34 @@ const swaggerDocument = require("./openapi.json");
 const app = express();
 app.use(express.json());
 
-const Database = require('better-sqlite3');
-const db = new Database('tasks.db');
+const { Pool } = require('pg');
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    done INTEGER DEFAULT 0
-  )
-`);
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+});
 
-const count = db.prepare('SELECT COUNT(*) AS count FROM tasks').get().count;
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tasks (
+      id SERIAL PRIMARY KEY,
+      title TEXT NOT NULL,
+      done BOOLEAN DEFAULT FALSE
+    );
+  `);
 
-if (count === 0) {
-  const insert = db.prepare('INSERT INTO tasks (title, done) VALUES (?, ?)');
-  insert.run('Learn Node.js', 1);
-  insert.run('Build a CRUD API', 1);
-  insert.run('Connect to SQLite', 0);
+  const res = await pool.query('SELECT COUNT(*) FROM tasks');
+  if (parseInt(res.rows[0].count, 10) === 0) {
+    await pool.query(`
+      INSERT INTO tasks (title, done) VALUES
+        ('Learn Docker', false),
+        ('Connect Postgres', false),
+        ('Ship Assignment 3', false);
+    `);
+  }
 }
+
+initDb().catch(console.error);
+
 
 // Serve Swagger UI at /docs
 app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
