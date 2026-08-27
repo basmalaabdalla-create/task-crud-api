@@ -47,6 +47,51 @@ async function initDb() {
 // Serve Swagger UI at /docs
 app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
+// POST /auth/signup
+app.post('/auth/signup', async (req, res) => {
+  const { email, password } = req.body;
+
+  // Validate presence of email and password
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
+  }
+
+  const { data, error } = await supabase.auth.signUp({
+    email,
+    password,
+  });
+
+  if (error) {
+    return res.status(400).json({ error: error.message });
+  }
+
+  res.status(201).json(data.user);
+});
+
+// POST /auth/login
+app.post('/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+
+  // Validate presence of email and password
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
+  }
+
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email,
+    password,
+  });
+
+  if (error) {
+    return res.status(401).json({ error: 'Invalid login credentials' });
+  }
+
+  res.json({
+    access_token: data.session.access_token,
+    refresh_token: data.session.refresh_token,
+  });
+});
+
 // Root endpoint
 app.get("/", (req, res) => {
   res.json({
