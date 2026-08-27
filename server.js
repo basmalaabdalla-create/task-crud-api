@@ -3,10 +3,23 @@ const express = require("express");
 const swaggerUi = require("swagger-ui-express");
 const swaggerDocument = require("./openapi.json");
 const { Pool } = require('pg');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 app.use(express.json());
 
+// Initialize Supabase Client
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_KEY;
+
+if (!supabaseUrl || !supabaseKey) {
+  console.error("Missing SUPABASE_URL or SUPABASE_KEY in environment variables!");
+  process.exit(1);
+}
+
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+// PostgreSQL Pool Setup
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
@@ -122,6 +135,6 @@ app.delete('/tasks/:id', async (req, res) => {
 
 app.listen(3000, async () => {
   await initDb().catch(console.error);
-  console.log("Server running on http://localhost:3000");
+  console.log("Server running on http://localhost:3000 and connected to Supabase");
   console.log("Swagger UI available at http://localhost:3000/docs");
 });
