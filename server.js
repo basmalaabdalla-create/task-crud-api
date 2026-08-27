@@ -3,21 +3,13 @@ const express = require("express");
 const swaggerUi = require("swagger-ui-express");
 const swaggerDocument = require("./openapi.json");
 const { Pool } = require('pg');
-const { createClient } = require('@supabase/supabase-js');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 
 const app = express();
 app.use(express.json());
 
-// Initialize Supabase Client
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_KEY;
-
-if (!supabaseUrl || !supabaseKey) {
-  console.error("Missing SUPABASE_URL or SUPABASE_KEY in environment variables!");
-  process.exit(1);
-}
-
-const supabase = createClient(supabaseUrl, supabaseKey);
+const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-local-key';
 
 // PostgreSQL Pool Setup
 const pool = new Pool({
@@ -25,29 +17,30 @@ const pool = new Pool({
 });
 
 async function initDb() {
+  // Create tasks table
   await pool.query(`
     CREATE TABLE IF NOT EXISTS tasks (
       id SERIAL PRIMARY KEY,
+      user_id TEXT NOT NULL,
       title TEXT NOT NULL,
       done BOOLEAN DEFAULT FALSE
     );
   `);
 
-  const res = await pool.query('SELECT COUNT(*) FROM tasks');
-  if (parseInt(res.rows[0].count, 10) === 0) {
-    await pool.query(`
-      INSERT INTO tasks (title, done) VALUES
-        ('Learn Docker', false),
-        ('Connect Postgres', false),
-        ('Ship Assignment 3', false);
-    `);
-  }
+  // Create local users table
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL
+    );
+  `);
 }
 
 // Serve Swagger UI at /docs
 app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
-// --- STAGE 1: AUTH ROUTES ---
+// --- AUTH ROUTES ---
 
 // POST /auth/signup
 app.post('/auth/signup', async (req, res) => {
@@ -57,16 +50,22 @@ app.post('/auth/signup', async (req, res) => {
     return res.status(400).json({ error: 'Email and password are required' });
   }
 
-  const { data, error } = await supabase.auth.signUp({
-    email,
-    password,
-  });
+  try {
+    const existingUser = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (existingUser.rows.length > 0) {
+      return res.status(400).json({ error: 'User already exists' });
+    }
 
-  if (error) {
-    return res.status(400).json({ error: error.message });
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const result = await pool.query(
+      'INSERT INTO users (email, password) VALUES ($1, $2) RETURNING id, email',
+      [email, hashedPassword]
+    );
+
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  res.status(201).json(data.user);
 });
 
 // POST /auth/login
@@ -77,25 +76,34 @@ app.post('/auth/login', async (req, res) => {
     return res.status(400).json({ error: 'Email and password are required' });
   }
 
-  const { data, error } = await supabase.auth.signInWithPassword({
-    email,
-    password,
-  });
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (result.rows.length === 0) {
+      return res.status(401).json({ error: 'Invalid login credentials' });
+    }
 
-  if (error) {
-    return res.status(401).json({ error: 'Invalid login credentials' });
+    const user = result.rows[0];
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+
+    if (!isPasswordValid) {
+      return res.status(401).json({ error: 'Invalid login credentials' });
+    }
+
+    const token = jwt.sign(
+      { id: user.id.toString(), email: user.email },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    res.json({ access_token: token, refresh_token: token });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  res.json({
-    access_token: data.session.access_token,
-    refresh_token: data.session.refresh_token,
-  });
 });
 
-// --- STAGE 2: AUTHENTICATION MIDDLEWARE ---
+// --- AUTHENTICATION MIDDLEWARE ---
 
-const authenticateUser = async (req, res, next) => {
-  console.log(">>> AUTH MIDDLEWARE EXECUTED <<<");
+const authenticateUser = (req, res, next) => {
   const authHeader = req.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -104,19 +112,17 @@ const authenticateUser = async (req, res, next) => {
 
   const token = authHeader.split(' ')[1];
 
-  const { data: { user }, error } = await supabase.auth.getUser(token);
-
-  if (error || !user) {
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
-
-  req.user = user;
-  next();
 };
 
-// --- SYSTEM & TASK ROUTES ---
+// --- SYSTEM ROUTES ---
 
-// Root endpoint
 app.get("/", (req, res) => {
   res.json({
     name: "Task API",
@@ -125,25 +131,30 @@ app.get("/", (req, res) => {
   });
 });
 
-// Health endpoint
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-// GET /tasks (PROTECTED)
+// --- STAGE 3: USER-BOUND TASK ROUTES ---
+
 app.get('/tasks', authenticateUser, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM tasks ORDER BY id ASC');
+    const result = await pool.query(
+      'SELECT * FROM tasks WHERE user_id = $1 ORDER BY id ASC',
+      [req.user.id]
+    );
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// GET /tasks/:id (PROTECTED)
 app.get('/tasks/:id', authenticateUser, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM tasks WHERE id = $1', [req.params.id]);
+    const result = await pool.query(
+      'SELECT * FROM tasks WHERE id = $1 AND user_id = $2',
+      [req.params.id, req.user.id]
+    );
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Task not found' });
     }
@@ -153,7 +164,6 @@ app.get('/tasks/:id', authenticateUser, async (req, res) => {
   }
 });
 
-// POST /tasks (PROTECTED)
 app.post('/tasks', authenticateUser, async (req, res) => {
   const { title } = req.body;
   if (!title) {
@@ -161,8 +171,8 @@ app.post('/tasks', authenticateUser, async (req, res) => {
   }
   try {
     const result = await pool.query(
-      'INSERT INTO tasks (title) VALUES ($1) RETURNING *',
-      [title]
+      'INSERT INTO tasks (user_id, title) VALUES ($1, $2) RETURNING *',
+      [req.user.id, title]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -170,15 +180,14 @@ app.post('/tasks', authenticateUser, async (req, res) => {
   }
 });
 
-// PUT /tasks/:id (PROTECTED)
 app.put('/tasks/:id', authenticateUser, async (req, res) => {
   const title = req.body.title !== undefined ? req.body.title : null;
   const done = req.body.done !== undefined ? Boolean(req.body.done) : null;
 
   try {
     const result = await pool.query(
-      'UPDATE tasks SET title = COALESCE($1, title), done = COALESCE($2, done) WHERE id = $3 RETURNING *',
-      [title, done, req.params.id]
+      'UPDATE tasks SET title = COALESCE($1, title), done = COALESCE($2, done) WHERE id = $3 AND user_id = $4 RETURNING *',
+      [title, done, req.params.id, req.user.id]
     );
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Task not found' });
@@ -189,10 +198,12 @@ app.put('/tasks/:id', authenticateUser, async (req, res) => {
   }
 });
 
-// DELETE /tasks/:id (PROTECTED)
 app.delete('/tasks/:id', authenticateUser, async (req, res) => {
   try {
-    const result = await pool.query('DELETE FROM tasks WHERE id = $1 RETURNING *', [req.params.id]);
+    const result = await pool.query(
+      'DELETE FROM tasks WHERE id = $1 AND user_id = $2 RETURNING *',
+      [req.params.id, req.user.id]
+    );
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Task not found' });
     }
@@ -204,6 +215,6 @@ app.delete('/tasks/:id', authenticateUser, async (req, res) => {
 
 app.listen(3000, async () => {
   await initDb().catch(console.error);
-  console.log("Server running on http://localhost:3000 and connected to Supabase");
+  console.log("Server running on http://localhost:3000 (Local Authentication)");
   console.log("Swagger UI available at http://localhost:3000/docs");
 });
