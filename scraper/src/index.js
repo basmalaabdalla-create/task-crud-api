@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import * as cheerio from 'cheerio';
+import { z } from 'zod';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,6 +18,18 @@ if (!fs.existsSync(CACHE_DIR)) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Zod Schema Guard for Clean Book Record
+const BookSchema = z.object({
+  title: z.string().min(1, 'Title cannot be empty'),
+  productUrl: z.string().url('Invalid product URL'),
+  price: z.number().positive('Price must be greater than 0'),
+  available: z.boolean(),
+  rating: z.number().min(1).max(5),
+  description: z.string().nullable(),
+  sourcePageUrl: z.string().url('Invalid source page URL'),
+  fetchedAt: z.string().datetime('Must be valid ISO timestamp'),
+});
 
 async function fetchWithTimeout(url, timeoutMs) {
   const controller = new AbortController();
@@ -53,7 +66,6 @@ async function getCachedOrFetch(pageUrl, cacheFileName) {
   return { html, fromCache: false };
 }
 
-// 1. Discover product links from catalogue pages
 function parseCataloguePage(html, pageUrl) {
   const $ = cheerio.load(html);
   const bookUrls = [];
@@ -72,28 +84,36 @@ function parseCataloguePage(html, pageUrl) {
   return { bookUrls, nextPageUrl };
 }
 
-// 2. Extract detailed fields from an individual book detail HTML
+// Map rating words to numeric numbers
+function parseRating(ratingString) {
+  const map = { One: 1, Two: 2, Three: 3, Four: 4, Five: 5 };
+  return map[ratingString] || 0;
+}
+
+// Normalize raw extracted fields into typed variables
 function parseBookDetailPage(html, productUrl, sourcePageUrl) {
   const $ = cheerio.load(html);
 
   const title = $('div.product_main h1').text().trim();
   const rawPrice = $('div.product_main p.price_color').text().trim();
   const rawAvailability = $('div.product_main p.instock.availability').text().trim();
-
-  // Extract Rating
   const ratingClass = $('div.product_main p.star-rating').attr('class') || '';
   const rawRating = ratingClass.replace('star-rating', '').trim();
-
-  // Extract Description (located right after #product_description div header)
   const descriptionText = $('#product_description + p').text().trim();
+
+  // Data Normalization
+  const cleanedPriceStr = rawPrice.replace(/[^0-9.]/g, '');
+  const price = parseFloat(cleanedPriceStr);
+  const available = rawAvailability.toLowerCase().includes('in stock');
+  const rating = parseRating(rawRating);
   const description = descriptionText.length > 0 ? descriptionText : null;
 
   return {
     title,
     productUrl,
-    rawPrice,
-    rawAvailability,
-    rawRating,
+    price,
+    available,
+    rating,
     description,
     sourcePageUrl,
     fetchedAt: new Date().toISOString(),
@@ -105,7 +125,6 @@ async function run() {
   let pageCount = 0;
   const discoveredBookUrls = [];
 
-  console.log('--- STAGE 3: Discovering Book Links ---');
   while (currentCatalogueUrl && pageCount < MAX_PAGES) {
     pageCount++;
     const cacheFileName = `catalogue-page-${pageCount}.html`;
@@ -114,8 +133,6 @@ async function run() {
     const { bookUrls, nextPageUrl } = parseCataloguePage(html, currentCatalogueUrl);
 
     discoveredBookUrls.push(...bookUrls);
-    console.log(`Catalogue Page ${pageCount}: Found ${bookUrls.length} links.`);
-
     currentCatalogueUrl = nextPageUrl;
 
     if (currentCatalogueUrl && pageCount < MAX_PAGES && !fromCache) {
@@ -123,31 +140,44 @@ async function run() {
     }
   }
 
-  console.log(`\n--- STAGE 4: Scraping ${discoveredBookUrls.length} Detail Pages ---`);
-  const detailedBooks = [];
+  const validBooks = [];
+  const invalidRecords = [];
 
   for (let i = 0; i < discoveredBookUrls.length; i++) {
     const url = discoveredBookUrls[i];
-
-    // Create a safe, unique cache filename from the URL slug
     const urlParts = url.split('/');
     const slug = urlParts[urlParts.length - 2] || `item-${i}`;
     const detailCacheFile = `detail-${slug}.html`;
 
     const { html, fromCache } = await getCachedOrFetch(url, detailCacheFile);
-    const bookData = parseBookDetailPage(html, url, 'catalogue-page-1.html');
-    detailedBooks.push(bookData);
+    const rawRecord = parseBookDetailPage(html, url, 'https://books.toscrape.com/catalogue/page-1.html');
 
-    console.log(`[${i + 1}/${discoveredBookUrls.length}] ${fromCache ? 'CACHE' : 'FETCH'} | ${bookData.title}`);
+    // Perform Schema Validation
+    const validationResult = BookSchema.safeParse(rawRecord);
 
-    // Politeness delay between detail page network requests
+    if (validationResult.success) {
+      validBooks.push(validationResult.data);
+    } else {
+      invalidRecords.push({
+        record: rawRecord,
+        error: validationResult.error.format(),
+      });
+    }
+
     if (!fromCache && i < discoveredBookUrls.length - 1) {
       await sleep(POLITENESS_DELAY_MS);
     }
   }
 
-  console.log(`\nSTAGE 4 COMPLETE: Successfully scraped details for ${detailedBooks.length} books.`);
-  console.log('Sample Detailed Record:', JSON.stringify(detailedBooks[0], null, 2));
+  console.log(`\nSTAGE 5 COMPLETE: Validation Summary`);
+  console.log(`- Total Scraped: ${discoveredBookUrls.length}`);
+  console.log(`- Valid Records: ${validBooks.length}`);
+  console.log(`- Invalid Records: ${invalidRecords.length}`);
+
+  if (validBooks.length > 0) {
+    console.log('\nSample Normalized & Validated Record:');
+    console.log(JSON.stringify(validBooks[0], null, 2));
+  }
 }
 
 run().catch(console.error);
