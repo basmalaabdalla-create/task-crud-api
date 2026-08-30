@@ -16,7 +16,6 @@ if (!fs.existsSync(CACHE_DIR)) {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
 }
 
-// Helper: Sleep function for polite rate-limiting
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function fetchWithTimeout(url, timeoutMs) {
@@ -41,80 +40,114 @@ async function fetchWithTimeout(url, timeoutMs) {
   }
 }
 
-async function getCataloguePage(pageUrl, cacheFileName) {
+async function getCachedOrFetch(pageUrl, cacheFileName) {
   const cachePath = path.join(CACHE_DIR, cacheFileName);
 
   if (fs.existsSync(cachePath)) {
     const cachedHtml = fs.readFileSync(cachePath, 'utf8');
-    console.log(`CACHE HIT | File: ${cacheFileName}`);
     return { html: cachedHtml, fromCache: true };
   }
 
   const html = await fetchWithTimeout(pageUrl, TIMEOUT_MS);
   fs.writeFileSync(cachePath, html, 'utf8');
-  console.log(`FETCH | File: ${cacheFileName}`);
   return { html, fromCache: false };
 }
 
+// 1. Discover product links from catalogue pages
 function parseCataloguePage(html, pageUrl) {
   const $ = cheerio.load(html);
-  const books = [];
+  const bookUrls = [];
 
   $('article.product_pod').each((_, element) => {
-    const $el = $(element);
-    const $link = $el.find('h3 a');
-    const title = $link.attr('title') || $link.text().trim();
-    const relativeUrl = $link.attr('href');
-    const productUrl = new URL(relativeUrl, pageUrl).href;
-
-    const rawPrice = $el.find('.price_color').text().trim();
-    const rawAvailability = $el.find('.instock.availability').text().trim();
-    const ratingClass = $el.find('.star-rating').attr('class') || '';
-    const rawRating = ratingClass.replace('star-rating', '').trim();
-
-    books.push({
-      title,
-      productUrl,
-      rawPrice,
-      rawAvailability,
-      rawRating,
-      sourcePageUrl: pageUrl,
-      fetchedAt: new Date().toISOString(),
-    });
+    const relativeUrl = $(element).find('h3 a').attr('href');
+    if (relativeUrl) {
+      const fullUrl = new URL(relativeUrl, pageUrl).href;
+      bookUrls.push(fullUrl);
+    }
   });
 
-  // Extract "Next" pagination link if present
   const nextRelUrl = $('li.next a').attr('href');
   const nextPageUrl = nextRelUrl ? new URL(nextRelUrl, pageUrl).href : null;
 
-  return { books, nextPageUrl };
+  return { bookUrls, nextPageUrl };
+}
+
+// 2. Extract detailed fields from an individual book detail HTML
+function parseBookDetailPage(html, productUrl, sourcePageUrl) {
+  const $ = cheerio.load(html);
+
+  const title = $('div.product_main h1').text().trim();
+  const rawPrice = $('div.product_main p.price_color').text().trim();
+  const rawAvailability = $('div.product_main p.instock.availability').text().trim();
+
+  // Extract Rating
+  const ratingClass = $('div.product_main p.star-rating').attr('class') || '';
+  const rawRating = ratingClass.replace('star-rating', '').trim();
+
+  // Extract Description (located right after #product_description div header)
+  const descriptionText = $('#product_description + p').text().trim();
+  const description = descriptionText.length > 0 ? descriptionText : null;
+
+  return {
+    title,
+    productUrl,
+    rawPrice,
+    rawAvailability,
+    rawRating,
+    description,
+    sourcePageUrl,
+    fetchedAt: new Date().toISOString(),
+  };
 }
 
 async function run() {
-  let currentUrl = 'https://books.toscrape.com/catalogue/page-1.html';
+  let currentCatalogueUrl = 'https://books.toscrape.com/catalogue/page-1.html';
   let pageCount = 0;
-  const allDiscoveredBooks = [];
+  const discoveredBookUrls = [];
 
-  while (currentUrl && pageCount < MAX_PAGES) {
+  console.log('--- STAGE 3: Discovering Book Links ---');
+  while (currentCatalogueUrl && pageCount < MAX_PAGES) {
     pageCount++;
     const cacheFileName = `catalogue-page-${pageCount}.html`;
 
-    const { html, fromCache } = await getCataloguePage(currentUrl, cacheFileName);
-    const { books, nextPageUrl } = parseCataloguePage(html, currentUrl);
+    const { html, fromCache } = await getCachedOrFetch(currentCatalogueUrl, cacheFileName);
+    const { bookUrls, nextPageUrl } = parseCataloguePage(html, currentCatalogueUrl);
 
-    allDiscoveredBooks.push(...books);
-    console.log(`Page ${pageCount}: Found ${books.length} books.`);
+    discoveredBookUrls.push(...bookUrls);
+    console.log(`Catalogue Page ${pageCount}: Found ${bookUrls.length} links.`);
 
-    currentUrl = nextPageUrl;
+    currentCatalogueUrl = nextPageUrl;
 
-    // Apply politeness delay only if making a live network request for the next page
-    if (currentUrl && pageCount < MAX_PAGES && !fromCache) {
-      console.log(`Pausing ${POLITENESS_DELAY_MS}ms for politeness...`);
+    if (currentCatalogueUrl && pageCount < MAX_PAGES && !fromCache) {
       await sleep(POLITENESS_DELAY_MS);
     }
   }
 
-  console.log(`\nCRAWL COMPLETE: Discovered ${allDiscoveredBooks.length} total book listings across ${pageCount} pages.`);
+  console.log(`\n--- STAGE 4: Scraping ${discoveredBookUrls.length} Detail Pages ---`);
+  const detailedBooks = [];
+
+  for (let i = 0; i < discoveredBookUrls.length; i++) {
+    const url = discoveredBookUrls[i];
+
+    // Create a safe, unique cache filename from the URL slug
+    const urlParts = url.split('/');
+    const slug = urlParts[urlParts.length - 2] || `item-${i}`;
+    const detailCacheFile = `detail-${slug}.html`;
+
+    const { html, fromCache } = await getCachedOrFetch(url, detailCacheFile);
+    const bookData = parseBookDetailPage(html, url, 'catalogue-page-1.html');
+    detailedBooks.push(bookData);
+
+    console.log(`[${i + 1}/${discoveredBookUrls.length}] ${fromCache ? 'CACHE' : 'FETCH'} | ${bookData.title}`);
+
+    // Politeness delay between detail page network requests
+    if (!fromCache && i < discoveredBookUrls.length - 1) {
+      await sleep(POLITENESS_DELAY_MS);
+    }
+  }
+
+  console.log(`\nSTAGE 4 COMPLETE: Successfully scraped details for ${detailedBooks.length} books.`);
+  console.log('Sample Detailed Record:', JSON.stringify(detailedBooks[0], null, 2));
 }
 
 run().catch(console.error);
