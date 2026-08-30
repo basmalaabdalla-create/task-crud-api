@@ -1,17 +1,10 @@
 {
   "name": "scraper",
   "version": "1.0.0",
-  "description": "- **Target Site:** Books to Scrape (https://books.toscrape.com)\r - **Purpose:** Public practice sandbox designed explicitly for web scraping practice.\r - **Scope:** First 3 catalogue pages (~60 book detail pages).\r - **Data Collected:** Title, product URL, price, availability, rating, description, source page, and fetch timestamp.\r - **Robots.txt Check:** Requested `https://books.toscrape.com/robots.txt` (result: no robots file found).\r - **Ethics Statement:** I will not reuse this code on another site without checking its rules and terms first.",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
+  "type": "module",
+  "main": "src/index.js",
   "dependencies": {
-    "cheerio": "^1.2.0",
-    "zod": "^4.5.4"
+    "cheerio": "^1.0.0",
+    "zod": "^3.0.0"
   }
 }
