@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { performance } from 'perf_hooks';
 import * as cheerio from 'cheerio';
 import { z } from 'zod';
 
@@ -8,18 +9,23 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const CACHE_DIR = path.join(__dirname, '../cache');
+const OUTPUT_DIR = path.join(__dirname, '../output');
+
 const USER_AGENT = 'FlyRankInternship-A9/1.0 (+https://github.com/your-username/repo)';
 const TIMEOUT_MS = 5000;
 const POLITENESS_DELAY_MS = 500;
 const MAX_PAGES = 3;
 
-if (!fs.existsSync(CACHE_DIR)) {
-  fs.mkdirSync(CACHE_DIR, { recursive: true });
-}
+// Ensure output and cache directories exist
+[CACHE_DIR, OUTPUT_DIR].forEach((dir) => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+});
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Zod Schema Guard for Clean Book Record
+// Zod Schema Guard
 const BookSchema = z.object({
   title: z.string().min(1, 'Title cannot be empty'),
   productUrl: z.string().url('Invalid product URL'),
@@ -30,6 +36,14 @@ const BookSchema = z.object({
   sourcePageUrl: z.string().url('Invalid source page URL'),
   fetchedAt: z.string().datetime('Must be valid ISO timestamp'),
 });
+
+// Telemetry counters for run report
+const metrics = {
+  cataloguePagesCrawled: 0,
+  detailPagesScraped: 0,
+  cacheHits: 0,
+  networkFetches: 0,
+};
 
 async function fetchWithTimeout(url, timeoutMs) {
   const controller = new AbortController();
@@ -57,10 +71,12 @@ async function getCachedOrFetch(pageUrl, cacheFileName) {
   const cachePath = path.join(CACHE_DIR, cacheFileName);
 
   if (fs.existsSync(cachePath)) {
+    metrics.cacheHits++;
     const cachedHtml = fs.readFileSync(cachePath, 'utf8');
     return { html: cachedHtml, fromCache: true };
   }
 
+  metrics.networkFetches++;
   const html = await fetchWithTimeout(pageUrl, TIMEOUT_MS);
   fs.writeFileSync(cachePath, html, 'utf8');
   return { html, fromCache: false };
@@ -84,13 +100,11 @@ function parseCataloguePage(html, pageUrl) {
   return { bookUrls, nextPageUrl };
 }
 
-// Map rating words to numeric numbers
 function parseRating(ratingString) {
   const map = { One: 1, Two: 2, Three: 3, Four: 4, Five: 5 };
   return map[ratingString] || 0;
 }
 
-// Normalize raw extracted fields into typed variables
 function parseBookDetailPage(html, productUrl, sourcePageUrl) {
   const $ = cheerio.load(html);
 
@@ -101,7 +115,6 @@ function parseBookDetailPage(html, productUrl, sourcePageUrl) {
   const rawRating = ratingClass.replace('star-rating', '').trim();
   const descriptionText = $('#product_description + p').text().trim();
 
-  // Data Normalization
   const cleanedPriceStr = rawPrice.replace(/[^0-9.]/g, '');
   const price = parseFloat(cleanedPriceStr);
   const available = rawAvailability.toLowerCase().includes('in stock');
@@ -121,12 +134,19 @@ function parseBookDetailPage(html, productUrl, sourcePageUrl) {
 }
 
 async function run() {
+  const startTime = performance.now();
+  const runTimestamp = new Date().toISOString();
+
   let currentCatalogueUrl = 'https://books.toscrape.com/catalogue/page-1.html';
   let pageCount = 0;
   const discoveredBookUrls = [];
 
+  console.log('--- STARTING SCRAPER ENGINE ---');
+
+  // Step 1: Link Discovery
   while (currentCatalogueUrl && pageCount < MAX_PAGES) {
     pageCount++;
+    metrics.cataloguePagesCrawled++;
     const cacheFileName = `catalogue-page-${pageCount}.html`;
 
     const { html, fromCache } = await getCachedOrFetch(currentCatalogueUrl, cacheFileName);
@@ -143,8 +163,11 @@ async function run() {
   const validBooks = [];
   const invalidRecords = [];
 
+  // Step 2: Detail Scraping & Parsing
   for (let i = 0; i < discoveredBookUrls.length; i++) {
     const url = discoveredBookUrls[i];
+    metrics.detailPagesScraped++;
+
     const urlParts = url.split('/');
     const slug = urlParts[urlParts.length - 2] || `item-${i}`;
     const detailCacheFile = `detail-${slug}.html`;
@@ -152,7 +175,7 @@ async function run() {
     const { html, fromCache } = await getCachedOrFetch(url, detailCacheFile);
     const rawRecord = parseBookDetailPage(html, url, 'https://books.toscrape.com/catalogue/page-1.html');
 
-    // Perform Schema Validation
+    // Step 3: Schema Validation
     const validationResult = BookSchema.safeParse(rawRecord);
 
     if (validationResult.success) {
@@ -169,15 +192,51 @@ async function run() {
     }
   }
 
-  console.log(`\nSTAGE 5 COMPLETE: Validation Summary`);
-  console.log(`- Total Scraped: ${discoveredBookUrls.length}`);
-  console.log(`- Valid Records: ${validBooks.length}`);
-  console.log(`- Invalid Records: ${invalidRecords.length}`);
+  const endTime = performance.now();
+  const durationMs = Math.round(endTime - startTime);
 
-  if (validBooks.length > 0) {
-    console.log('\nSample Normalized & Validated Record:');
-    console.log(JSON.stringify(validBooks[0], null, 2));
+  // Step 4: Write Output Files
+  const booksPath = path.join(OUTPUT_DIR, 'books.json');
+  fs.writeFileSync(booksPath, JSON.stringify(validBooks, null, 2), 'utf8');
+
+  if (invalidRecords.length > 0) {
+    const errorsPath = path.join(OUTPUT_DIR, 'errors.json');
+    fs.writeFileSync(errorsPath, JSON.stringify(invalidRecords, null, 2), 'utf8');
   }
+
+  const runReport = {
+    runAt: runTimestamp,
+    durationMs,
+    metrics: {
+      cataloguePagesCrawled: metrics.cataloguePagesCrawled,
+      detailPagesScraped: metrics.detailPagesScraped,
+      totalDiscoveredLinks: discoveredBookUrls.length,
+      cacheHits: metrics.cacheHits,
+      networkFetches: metrics.networkFetches,
+    },
+    quality: {
+      totalProcessed: discoveredBookUrls.length,
+      validRecords: validBooks.length,
+      invalidRecords: invalidRecords.length,
+      successRate: `${((validBooks.length / discoveredBookUrls.length) * 100).toFixed(1)}%`,
+    },
+    outputFiles: {
+      books: 'output/books.json',
+      report: 'output/run-report.json',
+      errors: invalidRecords.length > 0 ? 'output/errors.json' : null,
+    },
+  };
+
+  const reportPath = path.join(OUTPUT_DIR, 'run-report.json');
+  fs.writeFileSync(reportPath, JSON.stringify(runReport, null, 2), 'utf8');
+
+  console.log(`\n========================================`);
+  console.log(` SCRAPER COMPLETED SUCCESSFULLY`);
+  console.log(`========================================`);
+  console.log(`- Duration: ${durationMs} ms`);
+  console.log(`- Books Saved: ${validBooks.length} items -> output/books.json`);
+  console.log(`- Execution Report: output/run-report.json`);
+  console.log(`========================================\n`);
 }
 
 run().catch(console.error);
